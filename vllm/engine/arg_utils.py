@@ -1660,32 +1660,6 @@ class EngineArgs:
                 num_layers,
             )
 
-        # TQ sliding window protection: skip TQ on full attention layers
-        # in sliding window models. These layers are the sole retrieval
-        # path for tokens beyond the window — quantization error on them
-        # destroys long-context NIAH.
-        layer_types = getattr(hf_tc, "layer_types", None)
-        if (
-            resolved_cache_dtype.startswith("tq-")
-            and layer_types is not None
-            and "sliding_attention" in layer_types
-            and "full_attention" in layer_types
-        ):
-            full_attn_layers = [
-                str(i) for i, lt in enumerate(layer_types) if lt == "full_attention"
-            ]
-            existing = set(cache_config.kv_cache_dtype_skip_layers)
-            all_layers = existing | set(full_attn_layers)
-            numeric = sorted([x for x in all_layers if x.isdigit()], key=int)
-            non_numeric = sorted(x for x in all_layers if not x.isdigit())
-            cache_config.kv_cache_dtype_skip_layers = numeric + non_numeric
-            logger.info(
-                "TQ sliding window protection: skipping full attention "
-                "layers %s (total skip: %s)",
-                full_attn_layers,
-                cache_config.kv_cache_dtype_skip_layers,
-            )
-
         ray_runtime_env = None
         if is_ray_initialized():
             # Ray Serve LLM calls `create_engine_config` in the context
