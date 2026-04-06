@@ -264,6 +264,11 @@ class TQFullAttentionSpec(FullAttentionSpec):
             return self.block_size * self.num_kv_heads * self.tq_slot_size
         return super().real_page_size_bytes
 
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        merged = super().merge(specs)
+        return replace(merged, tq_slot_size=specs[0].tq_slot_size)
+
 
 @dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(FullAttentionSpec):
