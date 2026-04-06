@@ -241,10 +241,7 @@ class Attention(nn.Module, AttentionLayerBase):
             and kv_cache_scheme.get("strategy") == "attn_head"
         )
 
-        # Skip quantization for specified layers.
-        # For TQ dtypes, boundary layers stay on TQ but use FP8
-        # passthrough (no rotation/quantization) to preserve quality
-        # on sensitive first/last layers without creating mixed backends.
+        # Skip quantization for specified layers
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
             from vllm.model_executor.models.utils import extract_layer_index
 
@@ -409,26 +406,18 @@ class Attention(nn.Module, AttentionLayerBase):
         self, cache_dtype: str, head_size: int, prefix: str
     ) -> None:
         """Initialize TurboQuant rotation/projection matrices and centroids."""
-        from vllm.model_executor.layers.quantization.turboquant.centroids import (
-            get_centroids,
-        )
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
+        from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
         from vllm.model_executor.layers.quantization.turboquant.quantizer import (
             generate_rotation_matrix,
         )
+        from vllm.model_executor.layers.quantization.turboquant.centroids import get_centroids
 
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
 
         # Extract layer index from prefix (e.g. "model.layers.5.self_attn")
         from vllm.model_executor.models.utils import extract_layer_index
-
         layer_idx = extract_layer_index(prefix)
-
         # Shared KV layers must use their DONOR's rotation seed.
-        # The donor encoded the cache with its own Pi; the shared
-        # layer decodes with Pi, so they must match.
         if self.kv_sharing_target_layer_name is not None:
             donor_idx = extract_layer_index(self.kv_sharing_target_layer_name)
             seed = tq_config.seed + donor_idx * 1337
@@ -590,12 +579,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
-        # TQ models: ALL layers (including sliding window) must use TQ
-        # FullAttentionSpec to avoid mixed TURBOQUANT + FLASH_ATTN backends
-        # which cause page size and shape mismatches. Sliding layers fall
-        # through to the TQ path below.
         _is_tq = self.kv_cache_dtype.startswith("tq-")
-
         if self.sliding_window is not None and not _is_tq:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
@@ -609,13 +593,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window=self.sliding_window,
             )
         elif _is_tq:
-            from vllm.model_executor.layers.quantization.turboquant.config import (
-                TurboQuantConfig,
-            )
-
-            # Use model's REAL head_dim. No padding needed -- the
-            # UniformTypeKVCacheSpecs path allocates per-layer tensors
-            # with per-layer sizes (line 1122 of kv_cache_utils.py).
+            # Use real per-layer head_dim. UniformTypeKVCacheSpecs
+            # allocates per-layer tensors with per-layer sizes.
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TurboQuant attention backend for vLLM.
 
 Prefill: Standard scaled dot-product attention on uncompressed K/V,
@@ -19,7 +18,7 @@ Per-head per-position slot layout:
 import math
 import os
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 import torch
 import torch.nn.functional as F
@@ -115,18 +114,14 @@ class TurboQuantAttentionBackend(AttentionBackend):
         Layout: (num_blocks, block_size, num_kv_heads, padded_slot_size)
         Each slot = [key_packed | value_fp16 | padding].
 
-        For heterogeneous models (e.g. Gemma 4: d=256/512), the page
-        may be padded to the max slot size. The shape must match the
-        ALLOCATED bytes, so we use the real slot_size for this layer.
+        Note: head_size here is the *effective* head_size from the spec
+        The C++ TQ4FullAttentionSpec computes real_page_size_bytes from
+        _tq4_bytes_per_token_kv(head_size). We match by computing
+        slot_size from TurboQuantConfig.
         """
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
-
+        from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype_str, head_size)
-        slot_bytes = tq_config.slot_size
-
-        return (num_blocks, block_size, num_kv_heads, slot_bytes)
+        return (num_blocks, block_size, num_kv_heads, tq_config.slot_size)
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -145,20 +140,22 @@ class TurboQuantAttentionBackend(AttentionBackend):
 class TurboQuantMetadata(AttentionMetadata):
     """Metadata for TurboQuant attention."""
 
-    seq_lens: torch.Tensor  # (num_reqs,) — total context length per request
-    slot_mapping: torch.Tensor  # (num_tokens,) — cache slot for each token
-    block_table: torch.Tensor  # (num_reqs, max_num_blocks)
-    query_start_loc: torch.Tensor  # (num_reqs + 1,) — cu_seqlens for queries
-    num_actual_tokens: int = 0  # actual tokens (excluding padding)
-    max_query_len: int = 0  # longest query in batch
-    max_seq_len: int = 0  # longest context in batch
+    seq_lens: torch.Tensor          # (num_reqs,) — total context length per request
+    slot_mapping: torch.Tensor      # (num_tokens,) — cache slot for each token
+    block_table: torch.Tensor       # (num_reqs, max_num_blocks)
+    query_start_loc: torch.Tensor   # (num_reqs + 1,) — cu_seqlens for queries
+    num_actual_tokens: int = 0      # actual tokens (excluding padding)
+    max_query_len: int = 0          # longest query in batch
+    max_seq_len: int = 0            # longest context in batch
     is_prefill: bool = False
 
 
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     """Builds TurboQuantMetadata from scheduler output."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_BATCH
+    )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -220,20 +217,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self.num_kv_groups = num_heads // num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
 
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
-
+        from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
         self.tq_config = TurboQuantConfig.from_cache_dtype(kv_cache_dtype, head_size)
 
         # Pre-compute kernel constants from config (avoid repeated arithmetic)
         cfg = self.tq_config
-        self._mse_bytes = (
-            math.ceil(head_size * cfg.key_mse_bits / 8)
-            if not cfg.key_fp8
-            else head_size
-        )
-        self._val_data_bytes = math.ceil(head_size * cfg.effective_value_quant_bits / 8)
+        self._mse_bytes = (math.ceil(head_size * cfg.key_mse_bits / 8)
+                           if not cfg.key_fp8 else head_size)
+        self._val_data_bytes = math.ceil(
+            head_size * cfg.effective_value_quant_bits / 8)
         self._n_centroids = cfg.n_centroids if not cfg.key_fp8 else 1
 
     def _ensure_on_device(self, layer, device):
@@ -243,13 +235,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             layer._tq_Pi = Pi.to(device)
             layer._tq_centroids = layer._tq_centroids.to(device)
         # Cache contiguous float32 matrices and precomputed midpoints
-        if not hasattr(layer, "_tq_cached"):
+        if not hasattr(layer, '_tq_cached'):
             Pi_f = layer._tq_Pi.float().contiguous()
             c = layer._tq_centroids.float()
             layer._tq_PiT = Pi_f.T.contiguous()
             # Precompute midpoints for threshold-based quantization
             c_sorted, _ = c.sort()
-            layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
+            layer._tq_midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2)
             layer._tq_cached = True
 
     def do_kv_cache_update(
@@ -281,7 +273,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Use stream overlap only when not capturing CUDA graphs
         stream = aux_stream() if _USE_STREAM_OVERLAP else None
         use_overlap = (
-            stream is not None and not torch.cuda.is_current_stream_capturing()
+            stream is not None
+            and not torch.cuda.is_current_stream_capturing()
         )
 
         if use_overlap:
@@ -290,19 +283,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
             # Launch store on secondary stream
             with torch.cuda.stream(stream):
-                self._store_kv(
-                    k,
-                    v,
-                    kv_cache,
-                    slot_mapping,
-                    layer._tq_Pi,
-                    layer._tq_centroids,
-                    layer,
-                )
+                self._store_kv(k, v, kv_cache, slot_mapping,
+                               layer._tq_Pi, layer._tq_centroids,
+                               layer)
         else:
-            self._store_kv(
-                k, v, kv_cache, slot_mapping, layer._tq_Pi, layer._tq_centroids, layer
-            )
+            self._store_kv(k, v, kv_cache, slot_mapping,
+                           layer._tq_Pi, layer._tq_centroids,
+                           layer)
 
     def forward(
         self,
@@ -312,18 +299,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: "TurboQuantMetadata",
-        output: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         num_tokens = query.shape[0]
 
         if output is None:
             output = torch.zeros(
-                num_tokens,
-                self.num_heads * self.head_size,
-                dtype=query.dtype,
-                device=query.device,
+                num_tokens, self.num_heads * self.head_size,
+                dtype=query.dtype, device=query.device,
             )
 
         if attn_metadata is None:
@@ -344,11 +329,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         centroids = layer._tq_centroids
 
         # Ensure any async store has completed before decode reads cache
-        if (
-            _USE_STREAM_OVERLAP
-            and not attn_metadata.is_prefill
-            and not torch.cuda.is_current_stream_capturing()
-        ):
+        if (_USE_STREAM_OVERLAP
+                and not attn_metadata.is_prefill
+                and not torch.cuda.is_current_stream_capturing()):
             stream = aux_stream()
             if stream is not None:
                 torch.cuda.current_stream(device).wait_stream(stream)
@@ -362,9 +345,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # from the compressed KV cache.
         if not attn_metadata.is_prefill:
             # Pure decode batch — fast path
-            attn_out = self._decode_attention(
-                q, kv_cache, attn_metadata, Pi, centroids, PiT
-            )
+            attn_out = self._decode_attention(q, kv_cache, attn_metadata,
+                                              Pi, centroids, PiT)
         else:
             # Could be pure prefill or mixed prefill+decode.
             # Fast check: if max_query_len == max_seq_len, all requests are
@@ -375,7 +357,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             else:
                 query_start_loc = attn_metadata.query_start_loc
                 num_reqs = query_start_loc.shape[0] - 1
-                q_lens = query_start_loc[1:] - query_start_loc[:num_reqs]
+                q_lens = (query_start_loc[1:] - query_start_loc[:num_reqs])
                 has_decodes = (q_lens == 1).any().item()
 
             if not has_decodes:
@@ -383,22 +365,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 k = key[:N].view(N, self.num_kv_heads, self.head_size)
                 v = value[:N].view(N, self.num_kv_heads, self.head_size)
                 attn_out = self._prefill_attention(
-                    q, k, v, kv_cache, attn_metadata, Pi, centroids
-                )
+                    q, k, v, kv_cache, attn_metadata, Pi, centroids)
             else:
                 # Mixed batch: split into prefill and decode requests
                 attn_out = self._mixed_batch_attention(
-                    q,
-                    key[:N].view(N, self.num_kv_heads, self.head_size),
+                    q, key[:N].view(N, self.num_kv_heads, self.head_size),
                     value[:N].view(N, self.num_kv_heads, self.head_size),
-                    kv_cache,
-                    attn_metadata,
-                    Pi,
-                    centroids,
-                    PiT,
-                    query_start_loc,
-                    q_lens,
-                    num_reqs,
+                    kv_cache, attn_metadata, Pi, centroids, PiT,
+                    query_start_loc, q_lens, num_reqs,
                 )
 
         # Write into output buffer: attn_out is (N, Hq, D)
@@ -414,24 +388,18 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     # ------------------------------------------------------------------ #
     def _store_kv(
         self,
-        key: torch.Tensor,  # (N, Hk, D)
-        value: torch.Tensor,  # (N, Hk, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        key: torch.Tensor,     # (N, Hk, D)
+        value: torch.Tensor,   # (N, Hk, D)
+        kv_cache: torch.Tensor, # (num_blocks, block_size, Hk, slot_size)
         slot_mapping: torch.Tensor,
         Pi: torch.Tensor,
         centroids: torch.Tensor,
         layer: "AttentionLayer",
     ):
         """Quantize + store via fused Triton kernel."""
-        """Quantize + store via fused Triton kernel."""
         triton_tq_store(
-            key,
-            value,
-            kv_cache,
-            slot_mapping,
-            layer._tq_PiT,
-            centroids,
-            layer._tq_midpoints,
+            key, value, kv_cache, slot_mapping,
+            layer._tq_PiT, centroids, layer._tq_midpoints,
             mse_bits=self.tq_config.key_mse_bits,
             key_packed_size=self.tq_config.key_packed_size,
             value_quant_bits=self.tq_config.effective_value_quant_bits,
@@ -444,16 +412,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     # ------------------------------------------------------------------ #
     def _mixed_batch_attention(
         self,
-        query: torch.Tensor,  # (N, Hq, D) — all tokens
-        key: torch.Tensor,  # (N, Hk, D) — all tokens
-        value: torch.Tensor,  # (N, Hk, D) — all tokens
+        query: torch.Tensor,       # (N, Hq, D) — all tokens
+        key: torch.Tensor,         # (N, Hk, D) — all tokens
+        value: torch.Tensor,       # (N, Hk, D) — all tokens
         kv_cache: torch.Tensor,
         attn_metadata: TurboQuantMetadata,
         Pi: torch.Tensor,
         centroids: torch.Tensor,
         PiT: torch.Tensor | None,
         query_start_loc: torch.Tensor,  # (num_reqs + 1,)
-        q_lens: torch.Tensor,  # (num_reqs,) — per-request query len
+        q_lens: torch.Tensor,          # (num_reqs,) — per-request query len
         num_reqs: int,
     ) -> torch.Tensor:
         """Handle mixed prefill+decode batches from chunked prefill.
@@ -467,7 +435,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         output = torch.zeros(N, Hq, D, device=device, dtype=query.dtype)
 
         # Identify decode vs prefill requests
-        decode_mask = q_lens == 1  # (num_reqs,)
+        decode_mask = (q_lens == 1)  # (num_reqs,)
         prefill_mask = ~decode_mask
 
         # --- Handle prefill requests via _prefill_attention ---
@@ -486,9 +454,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 if q_len <= 0:
                     continue
 
-                q_seq = query[q_start:q_end]  # (q_len, Hq, D)
-                k_seq = key[q_start:q_end]  # (q_len, Hk, D)
-                v_seq = value[q_start:q_end]  # (q_len, Hk, D)
+                q_seq = query[q_start:q_end]   # (q_len, Hq, D)
+                k_seq = key[q_start:q_end]     # (q_len, Hk, D)
+                v_seq = value[q_start:q_end]   # (q_len, Hk, D)
 
                 seq_len = attn_metadata.seq_lens[i].item()
 
@@ -496,16 +464,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 # use causal SDPA on the raw tokens.
                 if q_len == seq_len:
                     Hk = k_seq.shape[1]
-                    use_gqa = Hk < Hq
+                    use_gqa = (Hk < Hq)
                     q_t = q_seq.transpose(0, 1).contiguous()
                     k_t = k_seq.transpose(0, 1).contiguous()
                     v_t = v_seq.transpose(0, 1).contiguous()
                     out = F.scaled_dot_product_attention(
-                        q_t,
-                        k_t,
-                        v_t,
-                        is_causal=True,
-                        scale=self.scale,
+                        q_t, k_t, v_t,
+                        is_causal=True, scale=self.scale,
                         enable_gqa=use_gqa,
                     )
                     output[q_start:q_end] = out.transpose(0, 1)
@@ -514,15 +479,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     # concatenate with current chunk, and attend to full seq.
                     cached_len = seq_len - q_len
                     out = self._continuation_prefill(
-                        q_seq,
-                        k_seq,
-                        v_seq,
-                        kv_cache,
-                        attn_metadata.block_table[i : i + 1],
-                        cached_len,
-                        seq_len,
-                        Pi,
-                        centroids,
+                        q_seq, k_seq, v_seq, kv_cache,
+                        attn_metadata.block_table[i:i+1],
+                        cached_len, seq_len,
+                        Pi, centroids,
                     )
                     output[q_start:q_end] = out.to(query.dtype)
 
@@ -543,8 +503,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 slot_mapping=attn_metadata.slot_mapping,  # not used by decode
                 block_table=decode_block_table,
                 query_start_loc=torch.arange(
-                    num_decodes + 1, device=device, dtype=torch.int32
-                ),
+                    num_decodes + 1, device=device, dtype=torch.int32),
                 num_actual_tokens=num_decodes,
                 max_query_len=1,
                 max_seq_len=decode_seq_lens.max().item(),
@@ -552,8 +511,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             )
 
             decode_out = self._decode_attention(
-                decode_q, kv_cache, decode_meta, Pi, centroids, PiT
-            )
+                decode_q, kv_cache, decode_meta, Pi, centroids, PiT)
 
             # Scatter decode results back to correct positions
             output[decode_token_offsets] = decode_out
@@ -565,9 +523,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     # ------------------------------------------------------------------ #
     def _prefill_attention(
         self,
-        query: torch.Tensor,  # (N, Hq, D)
-        key: torch.Tensor,  # (N, Hk, D)
-        value: torch.Tensor,  # (N, Hk, D)
+        query: torch.Tensor,   # (N, Hq, D)
+        key: torch.Tensor,     # (N, Hk, D)
+        value: torch.Tensor,   # (N, Hk, D)
         kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
         attn_metadata: TurboQuantMetadata,
         Pi: torch.Tensor,
@@ -578,13 +536,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
         # max_query_len == max_seq_len means no request has prior cached KV.
         # Both are Python ints — no GPU sync.
-        # NOTE: FlashAttention supports head_dim <= 256 only.  Gemma 4 global
-        # layers have head_dim=512, so we fall through to per-request SDPA.
-        if (
-            _HAS_FLASH_ATTN
-            and self.head_size <= 256
-            and attn_metadata.max_query_len == attn_metadata.max_seq_len
-        ):
+        # NOTE: FlashAttention supports head_dim <= 256 only.
+        if (_HAS_FLASH_ATTN
+                and self.head_size <= 256
+                and attn_metadata.max_query_len == attn_metadata.max_seq_len):
             output = torch.empty(N, Hq, D, device=query.device, dtype=query.dtype)
             flash_attn_varlen_func(
                 q=query,
@@ -605,7 +560,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # previously cached K/V from the TQ cache, not just the current
         # chunk's raw K/V.
         Hk = key.shape[1]
-        use_gqa = Hk < Hq
+        use_gqa = (Hk < Hq)
         query_start_loc = attn_metadata.query_start_loc
         num_reqs = query_start_loc.shape[0] - 1
 
@@ -619,9 +574,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 continue
 
             seq_len = attn_metadata.seq_lens[i].item()
-            q_seq = query[q_start:q_end]  # (q_len, Hq, D)
-            k_seq = key[q_start:q_end]  # (q_len, Hk, D)
-            v_seq = value[q_start:q_end]  # (q_len, Hk, D)
+            q_seq = query[q_start:q_end]       # (q_len, Hq, D)
+            k_seq = key[q_start:q_end]         # (q_len, Hk, D)
+            v_seq = value[q_start:q_end]       # (q_len, Hk, D)
 
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
@@ -630,11 +585,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 k_t = k_seq.transpose(0, 1).contiguous()
                 v_t = v_seq.transpose(0, 1).contiguous()
                 out = F.scaled_dot_product_attention(
-                    q_t,
-                    k_t,
-                    v_t,
-                    is_causal=True,
-                    scale=self.scale,
+                    q_t, k_t, v_t,
+                    is_causal=True, scale=self.scale,
                     enable_gqa=use_gqa,
                 )
                 output[q_start:q_end] = out.transpose(0, 1).to(query.dtype)
@@ -643,15 +595,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 # must be dequanted from the TQ cache and included.
                 cached_len = seq_len - q_len
                 out = self._continuation_prefill(
-                    q_seq,
-                    k_seq,
-                    v_seq,
-                    kv_cache,
-                    attn_metadata.block_table[i : i + 1],
-                    cached_len,
-                    seq_len,
-                    Pi,
-                    centroids,
+                    q_seq, k_seq, v_seq, kv_cache,
+                    attn_metadata.block_table[i:i+1],
+                    cached_len, seq_len,
+                    Pi, centroids,
                 )
                 output[q_start:q_end] = out.to(query.dtype)
 
@@ -659,11 +606,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
     def _continuation_prefill(
         self,
-        query: torch.Tensor,  # (q_len, Hq, D)
-        key_chunk: torch.Tensor,  # (q_len, Hk, D)
-        val_chunk: torch.Tensor,  # (q_len, Hk, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
-        block_table: torch.Tensor,  # (1, max_num_blocks)
+        query: torch.Tensor,      # (q_len, Hq, D)
+        key_chunk: torch.Tensor,   # (q_len, Hk, D)
+        val_chunk: torch.Tensor,   # (q_len, Hk, D)
+        kv_cache: torch.Tensor,    # (num_blocks, block_size, Hk, slot_size)
+        block_table: torch.Tensor, # (1, max_num_blocks)
         cached_len: int,
         seq_len: int,
         Pi: torch.Tensor,
@@ -687,25 +634,20 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Dequant cached K/V from TQ cache
         # Allocate slightly over to align to block_size for the grid
         alloc_len = math.ceil(cached_len / block_size) * block_size
-        k_cached = torch.zeros(1, Hk, alloc_len, D, dtype=torch.float16, device=device)
-        v_cached = torch.zeros(1, Hk, alloc_len, D, dtype=torch.float16, device=device)
+        k_cached = torch.zeros(1, Hk, alloc_len, D, dtype=torch.float16,
+                               device=device)
+        v_cached = torch.zeros(1, Hk, alloc_len, D, dtype=torch.float16,
+                               device=device)
 
         grid = (alloc_len, 1 * Hk)
         _tq_full_dequant_kv[grid](
             kv_cache,
             block_table,
             centroids.float(),
-            k_cached,
-            v_cached,
-            k_cached.stride(0),
-            k_cached.stride(1),
-            k_cached.stride(2),
-            v_cached.stride(0),
-            v_cached.stride(1),
-            v_cached.stride(2),
-            kv_cache.stride(0),
-            kv_cache.stride(1),
-            kv_cache.stride(2),
+            k_cached, v_cached,
+            k_cached.stride(0), k_cached.stride(1), k_cached.stride(2),
+            v_cached.stride(0), v_cached.stride(1), v_cached.stride(2),
+            kv_cache.stride(0), kv_cache.stride(1), kv_cache.stride(2),
             block_table.stride(0),
             HEAD_DIM=D,
             BLOCK_SIZE=block_size,
@@ -727,17 +669,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         if not self.tq_config.key_fp8:
             k_flat = k_cached[0, :, :cached_len, :].reshape(-1, D).float()
             k_flat = k_flat @ Pi.float()
-            k_cached_trim = (
-                k_flat.to(torch.float16).reshape(Hk, cached_len, D).transpose(0, 1)
-            )  # (cached_len, Hk, D)
+            k_cached_trim = k_flat.to(torch.float16).reshape(
+                Hk, cached_len, D).transpose(0, 1)  # (cached_len, Hk, D)
         else:
-            k_cached_trim = (
-                k_cached[0, :, :cached_len, :].transpose(0, 1).contiguous()
-            )  # (cached_len, Hk, D)
+            k_cached_trim = k_cached[0, :, :cached_len, :].transpose(
+                0, 1).contiguous()  # (cached_len, Hk, D)
 
-        v_cached_trim = (
-            v_cached[0, :, :cached_len, :].transpose(0, 1).contiguous()
-        )  # (cached_len, Hk, D)
+        v_cached_trim = v_cached[0, :, :cached_len, :].transpose(
+            0, 1).contiguous()  # (cached_len, Hk, D)
 
         # Concatenate cached + current chunk K/V (match query dtype)
         qdtype = query.dtype
@@ -748,8 +687,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # NOTE: FlashAttention supports head_dim <= 256 only.
         if _HAS_FLASH_ATTN and D <= 256:
             output = torch.empty(q_len, Hq, D, device=device, dtype=query.dtype)
-            cu_seqlens_q = torch.tensor([0, q_len], device=device, dtype=torch.int32)
-            cu_seqlens_k = torch.tensor([0, seq_len], device=device, dtype=torch.int32)
+            cu_seqlens_q = torch.tensor(
+                [0, q_len], device=device, dtype=torch.int32)
+            cu_seqlens_k = torch.tensor(
+                [0, seq_len], device=device, dtype=torch.int32)
             flash_attn_varlen_func(
                 q=query,
                 k=k_full,
@@ -765,21 +706,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             return output
         else:
             # SDPA fallback: expand KV for GQA, build causal mask
-            q_t = query.transpose(0, 1).unsqueeze(0)  # (1, Hq, q_len, D)
-            k_t = k_full.transpose(0, 1).unsqueeze(0)  # (1, Hk, seq_len, D)
-            v_t = v_full.transpose(0, 1).unsqueeze(0)  # (1, Hk, seq_len, D)
+            q_t = query.transpose(0, 1).unsqueeze(0)    # (1, Hq, q_len, D)
+            k_t = k_full.transpose(0, 1).unsqueeze(0)   # (1, Hk, seq_len, D)
+            v_t = v_full.transpose(0, 1).unsqueeze(0)   # (1, Hk, seq_len, D)
             # Build causal mask: query position p can attend to K position j
             # where j <= cached_len + p (p is 0-indexed within chunk)
             q_pos = torch.arange(q_len, device=device).unsqueeze(1) + cached_len
             k_pos = torch.arange(seq_len, device=device).unsqueeze(0)
             mask = k_pos <= q_pos  # (q_len, seq_len)
             out = F.scaled_dot_product_attention(
-                q_t,
-                k_t,
-                v_t,
-                attn_mask=mask,
-                scale=self.scale,
-                enable_gqa=(Hk < Hq),
+                q_t, k_t, v_t, attn_mask=mask,
+                scale=self.scale, enable_gqa=(Hk < Hq),
             )  # (1, Hq, q_len, D)
             return out[0].transpose(0, 1)  # (q_len, Hq, D)
 
@@ -788,8 +725,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     # ------------------------------------------------------------------ #
     def _decode_attention(
         self,
-        query: torch.Tensor,  # (B, Hq, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        query: torch.Tensor,      # (B, Hq, D)
+        kv_cache: torch.Tensor,    # (num_blocks, block_size, Hk, slot_size)
         attn_metadata: TurboQuantMetadata,
         Pi: torch.Tensor,
         centroids: torch.Tensor,
