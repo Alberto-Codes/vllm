@@ -329,6 +329,23 @@ class SlidingWindowSpec(AttentionSpec):
         return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
 
 
+@dataclass(frozen=True, kw_only=True)
+class TQSlidingWindowSpec(SlidingWindowSpec):
+    """SlidingWindowSpec with TQ-aware page size.
+
+    Overrides real_page_size_bytes to use TQ slot bytes instead of
+    the raw head_size * dtype formula. This ensures page size
+    compatibility with TQ FullAttentionSpec layers.
+    """
+    tq_slot_size: int = 0  # set by caller from TurboQuantConfig
+
+    @property
+    def real_page_size_bytes(self):
+        if self.tq_slot_size > 0:
+            return self.block_size * self.num_kv_heads * self.tq_slot_size
+        return super().real_page_size_bytes
+
+
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]

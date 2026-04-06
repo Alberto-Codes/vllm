@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    TQSlidingWindowSpec,
     get_kv_quant_mode,
 )
 
@@ -592,9 +593,30 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
             )
+        elif self.sliding_window is not None and _is_tq:
+            # TQ sliding layers: use TQSlidingWindowSpec to preserve
+            # sliding window eviction. For heterogeneous head_dim models
+            # (e.g. Gemma 4), fall through to FullAttentionSpec instead
+            # because different kv_heads/head_dims make pages incompatible.
+            hf_tc = vllm_config.model_config.hf_text_config
+            g_hd = getattr(hf_tc, "global_head_dim", None)
+            s_hd = getattr(hf_tc, "head_dim", None)
+            is_hetero = g_hd is not None and s_hd is not None and g_hd != s_hd
+            if not is_hetero:
+                from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
+                tq_slot = TurboQuantConfig.from_cache_dtype(
+                    self.kv_cache_dtype, self.head_size).slot_size
+                return TQSlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    dtype=self.kv_cache_torch_dtype,
+                    sliding_window=self.sliding_window,
+                    tq_slot_size=tq_slot,
+                )
+            # Heterogeneous: fall through to FullAttentionSpec below
         elif _is_tq:
-            # Use real per-layer head_dim. UniformTypeKVCacheSpecs
-            # allocates per-layer tensors with per-layer sizes.
+            # TQ full attention layers: use real per-layer head_dim.
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
