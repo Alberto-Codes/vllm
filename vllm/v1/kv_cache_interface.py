@@ -248,6 +248,24 @@ class FullAttentionSpec(AttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class TQFullAttentionSpec(FullAttentionSpec):
+    """FullAttentionSpec with TQ-aware page size.
+
+    Python equivalent of the C++ TQ4FullAttentionSpec. Overrides
+    real_page_size_bytes to use TQ slot bytes instead of the raw
+    head_size * dtype formula.
+    """
+
+    tq_slot_size: int = 0
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        if self.tq_slot_size > 0:
+            return self.block_size * self.num_kv_heads * self.tq_slot_size
+        return super().real_page_size_bytes
+
+
+@dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None

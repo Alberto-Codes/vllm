@@ -615,15 +615,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # than inner MSE layers. Pad ALL TQ layers to the max slot
             # so page sizes are uniform across all layers/spec types.
             has_tq_boundary = bool(vllm_config.cache_config.kv_cache_dtype_skip_layers)
-            if has_tq_boundary:
-                max_slot = TurboQuantConfig.from_cache_dtype(
-                    "tq-k8v4", self.head_size
-                ).slot_size
-                tq_page_pad = block_size * self.num_kv_heads * max_slot
-                tq_shape_dtype = "tq-k8v4"
-            else:
-                tq_page_pad = None
-                tq_shape_dtype = self.kv_cache_dtype
+            tq_shape_dtype = "tq-k8v4" if has_tq_boundary else self.kv_cache_dtype
 
             if self.sliding_window is not None:
                 hf_tc = vllm_config.model_config.hf_text_config
@@ -643,14 +635,25 @@ class Attention(nn.Module, AttentionLayerBase):
                 # Heterogeneous or boundary: use FullAttentionSpec
                 # (pages can't unify with TQSlidingWindowSpec).
 
-            return FullAttentionSpec(
+            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+            # Determine slot size for page calculation.
+            # With boundary: use max slot (tq-k8v4) for uniform pages.
+            # Without boundary: use per-layer slot.
+            tq_slot = (
+                TurboQuantConfig.from_cache_dtype("tq-k8v4", self.head_size).slot_size
+                if has_tq_boundary
+                else tq_config.slot_size
+            )
+
+            return TQFullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 cache_dtype_str=tq_shape_dtype,
-                page_size_padded=tq_page_pad,
+                tq_slot_size=tq_slot,
             )
         else:
             return FullAttentionSpec(
