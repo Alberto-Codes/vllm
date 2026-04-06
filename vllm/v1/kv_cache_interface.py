@@ -117,6 +117,7 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    cache_dtype_str: str | None = None
 
     @property
     def page_size_bytes(self) -> int:
@@ -218,6 +219,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            cache_dtype_str=specs[0].cache_dtype_str,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -337,6 +339,7 @@ class TQSlidingWindowSpec(SlidingWindowSpec):
     the raw head_size * dtype formula. This ensures page size
     compatibility with TQ FullAttentionSpec layers.
     """
+
     tq_slot_size: int = 0  # set by caller from TurboQuantConfig
 
     @property

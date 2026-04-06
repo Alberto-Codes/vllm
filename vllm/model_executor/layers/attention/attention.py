@@ -258,8 +258,13 @@ class Attention(nn.Module, AttentionLayerBase):
             if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
                 skip = True
             if skip:
-                kv_cache_dtype = "auto"
-                calculate_kv_scales = False
+                if kv_cache_dtype.startswith("tq-"):
+                    # TQ boundary: use FP8 passthrough (no rotation/quant)
+                    # instead of "auto" to stay on TURBOQUANT backend.
+                    kv_cache_dtype = "tq-k8v4"
+                else:
+                    kv_cache_dtype = "auto"
+                    calculate_kv_scales = False
             logger.info(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
                 prefix,
@@ -407,16 +412,21 @@ class Attention(nn.Module, AttentionLayerBase):
         self, cache_dtype: str, head_size: int, prefix: str
     ) -> None:
         """Initialize TurboQuant rotation/projection matrices and centroids."""
-        from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
+        from vllm.model_executor.layers.quantization.turboquant.centroids import (
+            get_centroids,
+        )
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            TurboQuantConfig,
+        )
         from vllm.model_executor.layers.quantization.turboquant.quantizer import (
             generate_rotation_matrix,
         )
-        from vllm.model_executor.layers.quantization.turboquant.centroids import get_centroids
 
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
 
         # Extract layer index from prefix (e.g. "model.layers.5.self_attn")
         from vllm.model_executor.models.utils import extract_layer_index
+
         layer_idx = extract_layer_index(prefix)
         # Shared KV layers must use their DONOR's rotation seed.
         if self.kv_sharing_target_layer_name is not None:
@@ -593,36 +603,54 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
             )
-        elif self.sliding_window is not None and _is_tq:
-            # TQ sliding layers: use TQSlidingWindowSpec to preserve
-            # sliding window eviction. For heterogeneous head_dim models
-            # (e.g. Gemma 4), fall through to FullAttentionSpec instead
-            # because different kv_heads/head_dims make pages incompatible.
-            hf_tc = vllm_config.model_config.hf_text_config
-            g_hd = getattr(hf_tc, "global_head_dim", None)
-            s_hd = getattr(hf_tc, "head_dim", None)
-            is_hetero = g_hd is not None and s_hd is not None and g_hd != s_hd
-            if not is_hetero:
-                from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
-                tq_slot = TurboQuantConfig.from_cache_dtype(
-                    self.kv_cache_dtype, self.head_size).slot_size
-                return TQSlidingWindowSpec(
-                    block_size=block_size,
-                    num_kv_heads=self.num_kv_heads,
-                    head_size=self.head_size,
-                    dtype=self.kv_cache_torch_dtype,
-                    sliding_window=self.sliding_window,
-                    tq_slot_size=tq_slot,
-                )
-            # Heterogeneous: fall through to FullAttentionSpec below
         elif _is_tq:
-            # TQ full attention layers: use real per-layer head_dim.
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            tq_config = TurboQuantConfig.from_cache_dtype(
+                self.kv_cache_dtype, self.head_size
+            )
+            # When boundary layers exist, they have larger FP8 slots
+            # than inner MSE layers. Pad ALL TQ layers to the max slot
+            # so page sizes are uniform across all layers/spec types.
+            has_tq_boundary = bool(vllm_config.cache_config.kv_cache_dtype_skip_layers)
+            if has_tq_boundary:
+                max_slot = TurboQuantConfig.from_cache_dtype(
+                    "tq-k8v4", self.head_size
+                ).slot_size
+                tq_page_pad = block_size * self.num_kv_heads * max_slot
+                tq_shape_dtype = "tq-k8v4"
+            else:
+                tq_page_pad = None
+                tq_shape_dtype = self.kv_cache_dtype
+
+            if self.sliding_window is not None:
+                hf_tc = vllm_config.model_config.hf_text_config
+                g_hd = getattr(hf_tc, "global_head_dim", None)
+                s_hd = getattr(hf_tc, "head_dim", None)
+                is_hetero = g_hd is not None and s_hd is not None and g_hd != s_hd
+                if not is_hetero and not has_tq_boundary:
+                    return TQSlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=self.num_kv_heads,
+                        head_size=self.head_size,
+                        dtype=self.kv_cache_torch_dtype,
+                        sliding_window=self.sliding_window,
+                        tq_slot_size=tq_config.slot_size,
+                        cache_dtype_str=tq_shape_dtype,
+                    )
+                # Heterogeneous or boundary: use FullAttentionSpec
+                # (pages can't unify with TQSlidingWindowSpec).
+
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
+                cache_dtype_str=tq_shape_dtype,
+                page_size_padded=tq_page_pad,
             )
         else:
             return FullAttentionSpec(
