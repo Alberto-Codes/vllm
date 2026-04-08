@@ -25,12 +25,12 @@ import torch.nn.functional as F
 
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import aux_stream
-from vllm.v1.attention.ops.triton_tq_decode import (
+from vllm.v1.attention.ops.triton_turboquant_decode import (
     _tq_full_dequant_kv,
     _use_fp8_e4b15,
-    triton_tq_decode_attention,
+    triton_turboquant_decode_attention,
 )
-from vllm.v1.attention.ops.triton_tq_store import triton_tq_store
+from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
 
 # CUDA stream overlap: disabled by default — degrades TTFT under concurrent
 # load (489ms vs 338ms). Enable via TQ_STREAM_OVERLAP=1 for experimentation.
@@ -111,8 +111,17 @@ class TurboQuantAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         """Combined K+V cache shape — no leading 2 dimension.
 
-        Layout: (num_blocks, block_size, num_kv_heads, padded_slot_size)
-        Each slot = [key_packed | value_fp16 | padding].
+        Standard attention backends use (2, num_blocks, block_size, num_kv_heads,
+        head_dim) with a leading 2 to separate K and V. TurboQuant packs K+V
+        into a single interleaved slot per head per position, so the cache is:
+
+            (num_blocks, block_size, num_kv_heads, padded_slot_size)
+
+        Each slot = [key_packed | value_packed | padding].
+        This is safe because TQ has its own get_kv_cache_shape override and
+        never shares cache tensors with other backends. Layers that fall back
+        to native dtype via kv_cache_dtype_skip_layers get their own
+        standard-shaped cache allocation.
 
         Note: head_size here is the *effective* head_size from the spec
         (= padded_slot // 2), NOT the model's actual head_dim.
@@ -394,7 +403,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         layer: "AttentionLayer",
     ):
         """Quantize + store via fused Triton kernel."""
-        triton_tq_store(
+        triton_turboquant_store(
             key, value, kv_cache, slot_mapping,
             layer._tq_PiT, centroids, layer._tq_midpoints,
             mse_bits=self.tq_config.key_mse_bits,
@@ -431,7 +440,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         device = query.device
         output = torch.zeros(N, Hq, D, device=device, dtype=query.dtype)
 
-        # Identify decode vs prefill requests
+        # V1 scheduler does NOT guarantee prefill-before-decode ordering in
+        # the batch — running requests (mixed decode + continuation) come first,
+        # then new prefills. We use masks to handle arbitrary interleaving.
         decode_mask = (q_lens == 1)  # (num_reqs,)
         prefill_mask = ~decode_mask
 
@@ -725,7 +736,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         centroids: torch.Tensor,
         PiT: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return triton_tq_decode_attention(
+        return triton_turboquant_decode_attention(
             query=query,
             kv_cache=kv_cache,
             block_table=attn_metadata.block_table,

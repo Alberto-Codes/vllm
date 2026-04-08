@@ -5,7 +5,7 @@ Two paths:
 1. _tq_fused_store: Pack-only kernel (idx/norms pre-computed via external cuBLAS).
 2. FP8 key path: reuses _tq_fused_store with KEY_FP8=True.
 
-The launcher `triton_tq_store` selects the appropriate path.
+The launcher `triton_turboquant_store` selects the appropriate path.
 """
 
 import math
@@ -200,7 +200,7 @@ def _tq_fused_store(
 # Launcher
 # ═══════════════════════════════════════════════════════════════════════
 
-def triton_tq_store(
+def triton_turboquant_store(
     key: torch.Tensor,         # [N, H, D] — raw keys (post-RoPE)
     value: torch.Tensor,       # [N, H, D] — raw values
     kv_cache: torch.Tensor,    # [num_blocks, block_size, Hk, padded_slot] uint8

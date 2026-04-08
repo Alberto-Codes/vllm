@@ -8,29 +8,26 @@ from vllm.utils.math_utils import next_power_of_2
 
 
 # Named TQ presets: each maps to frozen config parameters.
-# These are the 4 validated configs with quality benchmarks.
+# key_quant_bits: 8 = FP8 keys, 3-4 = MSE (Lloyd-Max) quantized keys.
+# value_quant_bits: 3-4 = uniform quantized values.
 TQ_PRESETS: dict[str, dict] = {
     "tq-k8v4": {
-        "key_quant_bits": 8,  # FP8 keys
-        "total_bits": 4,
+        "key_quant_bits": 8,
         "value_quant_bits": 4,
         "norm_correction": False,
     },
     "tq-t4nc": {
-        "key_quant_bits": 0,  # 4-bit MSE keys (16 centroids)
-        "total_bits": 4,
+        "key_quant_bits": 4,
         "value_quant_bits": 4,
         "norm_correction": True,
     },
     "tq-k3v4nc": {
-        "key_quant_bits": 0,  # 3-bit MSE keys (8 centroids)
-        "total_bits": 3,
+        "key_quant_bits": 3,
         "value_quant_bits": 4,
         "norm_correction": True,
     },
     "tq-t3nc": {
-        "key_quant_bits": 0,  # 3-bit MSE keys (8 centroids)
-        "total_bits": 3,
+        "key_quant_bits": 3,
         "value_quant_bits": 3,
         "norm_correction": True,
     },
@@ -54,9 +51,8 @@ class TurboQuantConfig:
 
     Args:
         head_dim: Attention head dimension (e.g. 64, 96, 128).
-        total_bits: Bits per coordinate for key MSE quantization (3 or 4).
-        key_quant_bits: Override bits for key quantization.
-            0 = use total_bits (default). 8 = FP8 keys (hybrid mode).
+        key_quant_bits: Bits for key quantization. 8 = FP8 keys (no
+            rotation/MSE). 3-4 = Lloyd-Max MSE quantized keys.
         value_quant_bits: Bits per value dimension for uniform quantization.
             3 = 8 levels, 4 = 16 levels (default).
         seed: Base seed for deterministic random matrix generation.
@@ -66,47 +62,39 @@ class TurboQuantConfig:
             distortion, improving PPL by ~0.8% at 4-bit.
     """
     head_dim: int = 128
-    total_bits: int = 3
-    key_quant_bits: int = 0  # 0 = use total_bits (default), 8 = FP8 keys
-    value_quant_bits: int = 4  # 4 = 4-bit uniform, 8 = FP8 (E4M3)
+    key_quant_bits: int = 3  # 3-4 = MSE keys, 8 = FP8 keys
+    value_quant_bits: int = 4  # 3-4 = uniform quantized values
     seed: int = 42
     norm_correction: bool = False
 
     @property
-    def mse_bits(self) -> int:
-        """MSE bits per coordinate — always equals total_bits."""
-        return self.total_bits
-
-    @property
-    def effective_key_quant_bits(self) -> int:
-        """Actual bits used for key storage."""
-        if self.key_quant_bits == 8:
-            return 8
-        if self.key_quant_bits > 0:
-            return self.key_quant_bits
-        return self.mse_bits
-
-    @property
     def key_fp8(self) -> bool:
         """Whether keys are stored as FP8 — no rotation/quantization needed."""
-        return self.effective_key_quant_bits == 8
+        return self.key_quant_bits == 8
+
+    @property
+    def mse_bits(self) -> int:
+        """MSE quantizer bit-width (determines centroid count: 2^mse_bits).
+
+        For MSE key modes, equals key_quant_bits.
+        For FP8 key mode, falls back to value_quant_bits (centroids are still
+        needed for continuation-prefill dequant and decode kernel params).
+        """
+        if self.key_fp8:
+            return self.value_quant_bits
+        return self.key_quant_bits
 
     @property
     def key_mse_bits(self) -> int:
-        """MSE bits actually used for key quantization."""
+        """MSE bits actually used for key quantization (0 if FP8 keys)."""
         if self.key_fp8:
             return 0
-        return self.effective_key_quant_bits
+        return self.key_quant_bits
 
     @property
     def centroid_bits(self) -> int:
-        """Bits for centroid generation — always non-zero.
-
-        In FP8 key mode, key_mse_bits is 0 (no MSE), but centroids are still
-        needed for continuation-prefill dequant and decode kernel params.
-        Falls back to total_bits (mse_bits).
-        """
-        return self.key_mse_bits if not self.key_fp8 else self.mse_bits
+        """Bits for centroid generation — always non-zero."""
+        return self.mse_bits
 
     @property
     def n_centroids(self) -> int:
@@ -164,7 +152,7 @@ class TurboQuantConfig:
         return next_power_of_2(self.slot_size)
 
     @staticmethod
-    def get_boundary_skip_layers(num_layers: int, n: int) -> list[str]:
+    def get_boundary_skip_layers(num_layers: int, n: int = 2) -> list[str]:
         """Get layer indices to skip TQ compression (boundary protection).
 
         Returns first N and last N layer indices as strings, suitable for
@@ -194,7 +182,6 @@ class TurboQuantConfig:
         preset = TQ_PRESETS[cache_dtype]
         return TurboQuantConfig(
             head_dim=head_dim,
-            total_bits=preset["total_bits"],
             key_quant_bits=preset["key_quant_bits"],
             value_quant_bits=preset["value_quant_bits"],
             norm_correction=preset["norm_correction"],

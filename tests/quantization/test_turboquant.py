@@ -36,33 +36,33 @@ def _is_power_of_2(n: int) -> bool:
 # fmt: off
 PRESET_EXPECTED = {
     "tq-k8v4": dict(
-        key_fp8=True,  key_quant_bits=8, effective_key_quant_bits=8,
-        key_mse_bits=0, value_quant_bits=4, effective_value_quant_bits=4,
-        total_bits=4, mse_bits=4, n_centroids=16, centroid_bits=4,
+        key_fp8=True,  key_quant_bits=8,
+        key_mse_bits=0, value_quant_bits=4,
+        mse_bits=4, n_centroids=16, centroid_bits=4,
         norm_correction=False,
         key_packed_size=128, value_packed_size=68,
         slot_size=196, padded_slot_size=256,
     ),
     "tq-t4nc": dict(
-        key_fp8=False, key_quant_bits=0, effective_key_quant_bits=4,
-        key_mse_bits=4, value_quant_bits=4, effective_value_quant_bits=4,
-        total_bits=4, mse_bits=4, n_centroids=16, centroid_bits=4,
+        key_fp8=False, key_quant_bits=4,
+        key_mse_bits=4, value_quant_bits=4,
+        mse_bits=4, n_centroids=16, centroid_bits=4,
         norm_correction=True,
         key_packed_size=68, value_packed_size=68,
         slot_size=136, padded_slot_size=256,
     ),
     "tq-k3v4nc": dict(
-        key_fp8=False, key_quant_bits=0, effective_key_quant_bits=3,
-        key_mse_bits=3, value_quant_bits=4, effective_value_quant_bits=4,
-        total_bits=3, mse_bits=3, n_centroids=8, centroid_bits=3,
+        key_fp8=False, key_quant_bits=3,
+        key_mse_bits=3, value_quant_bits=4,
+        mse_bits=3, n_centroids=8, centroid_bits=3,
         norm_correction=True,
         key_packed_size=52, value_packed_size=68,
         slot_size=120, padded_slot_size=128,
     ),
     "tq-t3nc": dict(
-        key_fp8=False, key_quant_bits=0, effective_key_quant_bits=3,
-        key_mse_bits=3, value_quant_bits=3, effective_value_quant_bits=3,
-        total_bits=3, mse_bits=3, n_centroids=8, centroid_bits=3,
+        key_fp8=False, key_quant_bits=3,
+        key_mse_bits=3, value_quant_bits=3,
+        mse_bits=3, n_centroids=8, centroid_bits=3,
         norm_correction=True,
         key_packed_size=52, value_packed_size=52,
         slot_size=104, padded_slot_size=128,
@@ -95,7 +95,6 @@ class TestTurboQuantConfig:
         exp = PRESET_EXPECTED[preset]
         assert cfg.key_fp8 is exp["key_fp8"]
         assert cfg.key_quant_bits == exp["key_quant_bits"]
-        assert cfg.effective_key_quant_bits == exp["effective_key_quant_bits"]
         assert cfg.key_mse_bits == exp["key_mse_bits"]
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
@@ -103,13 +102,11 @@ class TestTurboQuantConfig:
         cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
         exp = PRESET_EXPECTED[preset]
         assert cfg.value_quant_bits == exp["value_quant_bits"]
-        assert cfg.effective_value_quant_bits == exp["effective_value_quant_bits"]
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
     def test_bits_and_centroids(self, preset):
         cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
         exp = PRESET_EXPECTED[preset]
-        assert cfg.total_bits == exp["total_bits"]
         assert cfg.mse_bits == exp["mse_bits"]
         assert cfg.n_centroids == exp["n_centroids"]
         assert cfg.centroid_bits == exp["centroid_bits"]
@@ -167,7 +164,7 @@ class TestTurboQuantConfig:
             assert cfg.key_quant_bits == 8
         else:
             assert cfg.key_mse_bits > 0
-            assert cfg.key_quant_bits == 0
+            assert cfg.key_quant_bits in (3, 4)
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
     @pytest.mark.parametrize("head_dim", [64, 96, 128, 256])
@@ -181,14 +178,14 @@ class TestTurboQuantConfig:
     # ---- Boundary skip layers ----
 
     def test_boundary_skip_layers_basic(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(32, 2)
+        layers = TurboQuantConfig.get_boundary_skip_layers(32)
         assert layers == ["0", "1", "30", "31"]
 
     def test_boundary_skip_layers_zero(self):
         assert TurboQuantConfig.get_boundary_skip_layers(32, 0) == []
 
     def test_boundary_skip_layers_small_model(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(4, 2)
+        layers = TurboQuantConfig.get_boundary_skip_layers(4)
         assert layers == ["0", "1", "2", "3"]
 
     def test_boundary_skip_layers_cap_at_half(self):
@@ -197,10 +194,8 @@ class TestTurboQuantConfig:
 
 
 # ============================================================================
-# Centroids tests (CPU-only, needs scipy)
+# Centroids tests (CPU-only)
 # ============================================================================
-
-scipy = pytest.importorskip("scipy")
 
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,

@@ -414,10 +414,14 @@ class Attention(nn.Module, AttentionLayerBase):
 
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
 
-        # Extract layer index from prefix (e.g. "model.layers.5.self_attn")
+        # Each layer needs a unique rotation matrix so quantization errors
+        # don't correlate across layers. Stride must exceed max head_dim to
+        # ensure non-overlapping RNG streams between adjacent layers.
+        _TQ_LAYER_SEED_STRIDE = 1337
+
         from vllm.model_executor.models.utils import extract_layer_index
         layer_idx = extract_layer_index(prefix)
-        seed = tq_config.seed + layer_idx * 1337
+        seed = tq_config.seed + layer_idx * _TQ_LAYER_SEED_STRIDE
 
         self.register_buffer(
             "_tq_Pi",

@@ -20,6 +20,15 @@ def _gaussian_pdf(x: float, sigma2: float) -> float:
     )
 
 
+def _trapz(f, a: float, b: float, n: int = 200) -> float:
+    """Trapezoidal numerical integration (replaces scipy.integrate.quad)."""
+    h = (b - a) / n
+    result = 0.5 * (f(a) + f(b))
+    for i in range(1, n):
+        result += f(a + i * h)
+    return result * h
+
+
 def solve_lloyd_max(
     d: int,
     bits: int,
@@ -38,8 +47,6 @@ def solve_lloyd_max(
         centroids: Sorted tensor of 2^bits optimal centroids.
         boundaries: Sorted tensor of 2^bits - 1 decision boundaries.
     """
-    from scipy import integrate
-
     n_levels = 2**bits
     sigma2 = 1.0 / d
     sigma = math.sqrt(sigma2)
@@ -58,8 +65,8 @@ def solve_lloyd_max(
         new_centroids = []
         for i in range(n_levels):
             a, b = edges[i], edges[i + 1]
-            num, _ = integrate.quad(lambda x: x * pdf(x), a, b)
-            den, _ = integrate.quad(pdf, a, b)
+            num = _trapz(lambda x: x * pdf(x), a, b)
+            den = _trapz(pdf, a, b)
             new_centroids.append(num / den if den > 1e-15 else centroids[i])
 
         if max(abs(new_centroids[i] - centroids[i]) for i in range(n_levels)) < tol:

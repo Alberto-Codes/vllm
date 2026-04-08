@@ -2,7 +2,7 @@
 """TurboQuant quantizer utilities.
 
 The only function used by vLLM's serving path is generate_rotation_matrix().
-Triton kernels (triton_tq_store.py / triton_tq_decode.py) handle all
+Triton kernels (triton_turboquant_store.py / triton_turboquant_decode.py) handle all
 quantization, packing, and dequantization on GPU.
 """
 

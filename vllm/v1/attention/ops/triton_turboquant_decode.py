@@ -438,7 +438,7 @@ def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
     return cfg
 
 
-def triton_tq_decode_attention(
+def triton_turboquant_decode_attention(
     query: torch.Tensor,        # [B, Hq, D] — original query
     kv_cache: torch.Tensor,     # [num_blocks, block_size, Hk, padded_slot] uint8
     block_table: torch.Tensor,  # [B, max_num_blocks] int32
