@@ -11,22 +11,22 @@ from vllm.utils.math_utils import next_power_of_2
 # key_quant_bits: 8 = FP8 keys, 3-4 = MSE (Lloyd-Max) quantized keys.
 # value_quant_bits: 3-4 = uniform quantized values.
 TQ_PRESETS: dict[str, dict] = {
-    "tq-k8v4": {
+    "turboquant_k8v4": {
         "key_quant_bits": 8,
         "value_quant_bits": 4,
         "norm_correction": False,
     },
-    "tq-t4nc": {
+    "turboquant_4bit_nc": {
         "key_quant_bits": 4,
         "value_quant_bits": 4,
         "norm_correction": True,
     },
-    "tq-k3v4nc": {
+    "turboquant_k3v4_nc": {
         "key_quant_bits": 3,
         "value_quant_bits": 4,
         "norm_correction": True,
     },
-    "tq-t3nc": {
+    "turboquant_3bit_nc": {
         "key_quant_bits": 3,
         "value_quant_bits": 3,
         "norm_correction": True,
@@ -44,10 +44,10 @@ class TurboQuantConfig:
     quality by amplifying variance through softmax.
 
     Named presets (use via --kv-cache-dtype):
-        tq-k8v4:   FP8 keys + 4-bit values, 2.6x compression, +1.17% PPL
-        tq-t4nc:   4-bit MSE keys + 4-bit values + NC, 3.8x, +2.71% PPL
-        tq-k3v4nc: 3-bit MSE keys + 4-bit values + NC, ~3.5x, +10.63% PPL
-        tq-t3nc:   3-bit MSE keys + 3-bit values + NC, 4.9x, +20.59% PPL
+        turboquant_k8v4:   FP8 keys + 4-bit values, 2.6x, +1.17% PPL
+        turboquant_4bit_nc: 4-bit MSE keys + 4-bit values + NC, 3.8x, +2.71%
+        turboquant_k3v4_nc: 3-bit MSE keys + 4-bit values + NC, ~3.5x, +10.63%
+        turboquant_3bit_nc: 3-bit MSE keys + 3-bit values + NC, 4.9x, +20.59%
 
     Args:
         head_dim: Attention head dimension (e.g. 64, 96, 128).
@@ -172,7 +172,7 @@ class TurboQuantConfig:
                          head_dim: int) -> "TurboQuantConfig":
         """Create config from a named preset.
 
-        Valid presets: tq-k8v4, tq-t4nc, tq-k3v4nc, tq-t3nc.
+        Valid presets: turboquant_k8v4, turboquant_4bit_nc, etc.
         """
         if cache_dtype not in TQ_PRESETS:
             valid = ", ".join(TQ_PRESETS.keys())

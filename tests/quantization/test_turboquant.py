@@ -35,7 +35,7 @@ def _is_power_of_2(n: int) -> bool:
 # Expected concrete values for each preset at head_dim=128.
 # fmt: off
 PRESET_EXPECTED = {
-    "tq-k8v4": dict(
+    "turboquant_k8v4": dict(
         key_fp8=True,  key_quant_bits=8,
         key_mse_bits=0, value_quant_bits=4,
         mse_bits=4, n_centroids=16, centroid_bits=4,
@@ -43,7 +43,7 @@ PRESET_EXPECTED = {
         key_packed_size=128, value_packed_size=68,
         slot_size=196, padded_slot_size=256,
     ),
-    "tq-t4nc": dict(
+    "turboquant_4bit_nc": dict(
         key_fp8=False, key_quant_bits=4,
         key_mse_bits=4, value_quant_bits=4,
         mse_bits=4, n_centroids=16, centroid_bits=4,
@@ -51,7 +51,7 @@ PRESET_EXPECTED = {
         key_packed_size=68, value_packed_size=68,
         slot_size=136, padded_slot_size=256,
     ),
-    "tq-k3v4nc": dict(
+    "turboquant_k3v4_nc": dict(
         key_fp8=False, key_quant_bits=3,
         key_mse_bits=3, value_quant_bits=4,
         mse_bits=3, n_centroids=8, centroid_bits=3,
@@ -59,7 +59,7 @@ PRESET_EXPECTED = {
         key_packed_size=52, value_packed_size=68,
         slot_size=120, padded_slot_size=128,
     ),
-    "tq-t3nc": dict(
+    "turboquant_3bit_nc": dict(
         key_fp8=False, key_quant_bits=3,
         key_mse_bits=3, value_quant_bits=3,
         mse_bits=3, n_centroids=8, centroid_bits=3,
@@ -85,7 +85,7 @@ class TestTurboQuantConfig:
 
     def test_invalid_preset_raises(self):
         with pytest.raises(ValueError, match="Unknown TurboQuant"):
-            TurboQuantConfig.from_cache_dtype("tq-invalid", head_dim=128)
+            TurboQuantConfig.from_cache_dtype("turboquant_invalid", head_dim=128)
 
     # ---- Per-preset concrete value checks (table-driven) ----
 

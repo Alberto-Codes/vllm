@@ -381,7 +381,7 @@ class Attention(nn.Module, AttentionLayerBase):
         _init_kv_cache_quant(self, quant_config, prefix)
 
         # Initialize TurboQuant buffers (Pi, S, centroids) if tq cache dtype
-        if kv_cache_dtype.startswith("tq-"):
+        if kv_cache_dtype.startswith("turboquant_"):
             self._init_turboquant_buffers(kv_cache_dtype, head_size, prefix)
 
         # for attn backends supporting query quantization
@@ -590,7 +590,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
             )
-        elif self.kv_cache_dtype.startswith("tq-"):
+        elif self.kv_cache_dtype.startswith("turboquant_"):
             from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
             tq_config = TurboQuantConfig.from_cache_dtype(
                 self.kv_cache_dtype, self.head_size)
