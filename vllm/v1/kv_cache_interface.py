@@ -265,6 +265,10 @@ class TQFullAttentionSpec(FullAttentionSpec):
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         merged = super().merge(specs)
+        assert all(s.tq_slot_size == specs[0].tq_slot_size for s in specs), (
+            "All TQ layers in the same KV cache group must use the same "
+            "tq_slot_size."
+        )
         return replace(merged, tq_slot_size=specs[0].tq_slot_size)
 
 
