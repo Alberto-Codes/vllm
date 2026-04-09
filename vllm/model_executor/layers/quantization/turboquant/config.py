@@ -4,8 +4,6 @@
 import math
 from dataclasses import dataclass
 
-from vllm.utils.math_utils import next_power_of_2
-
 
 # Named TQ presets: each maps to frozen config parameters.
 # key_quant_bits: 8 = FP8 keys, 3-4 = MSE (Lloyd-Max) quantized keys.
@@ -141,15 +139,14 @@ class TurboQuantConfig:
         return self.key_packed_size + self.value_packed_size
 
     @property
-    def padded_slot_size(self) -> int:
-        """Slot size rounded up to next power of 2.
+    def slot_size_aligned(self) -> int:
+        """Slot size rounded up to next even number.
 
-        Power-of-2 is required for hybrid attention+mamba models (e.g.
-        Qwen3.5) where page sizes must align across attention and mamba
-        layers.  Also satisfies the even-number requirement for
-        effective_head_size = padded_slot_size // 2.
+        Even-number is required so effective_head_size = slot_size_aligned // 2
+        is integral.
         """
-        return next_power_of_2(self.slot_size)
+        s = self.slot_size
+        return s + (s % 2)  # round up to even
 
     @staticmethod
     def get_boundary_skip_layers(num_layers: int, n: int = 2) -> list[str]:

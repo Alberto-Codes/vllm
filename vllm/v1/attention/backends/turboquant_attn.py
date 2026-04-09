@@ -123,7 +123,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
         head_dim) with a leading 2 to separate K and V. TurboQuant packs K+V
         into a single interleaved slot per head per position, so the cache is:
 
-            (num_blocks, block_size, num_kv_heads, padded_slot_size)
+            (num_blocks, block_size, num_kv_heads, slot_size_aligned)
 
         Each slot = [key_packed | value_packed | padding].
         This is safe because TQ has its own get_kv_cache_shape override and

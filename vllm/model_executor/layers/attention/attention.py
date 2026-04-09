@@ -594,7 +594,7 @@ class Attention(nn.Module, AttentionLayerBase):
             from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
             tq_config = TurboQuantConfig.from_cache_dtype(
                 self.kv_cache_dtype, self.head_size)
-            padded_slot = tq_config.padded_slot_size
+            padded_slot = tq_config.slot_size_aligned
             effective_head_size = padded_slot // 2
             return FullAttentionSpec(
                 block_size=block_size,
