@@ -1627,7 +1627,7 @@ class EngineArgs:
         # Users can add extra layers via --kv-cache-dtype-skip-layers.
         # Disabled for hybrid models (attn+mamba) — mixed page sizes break
         # the required page size unification.
-        if (resolved_cache_dtype.startswith("tq-")
+        if (resolved_cache_dtype.startswith("turboquant_")
                 and not model_config.is_hybrid):
             from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
             num_layers = model_config.hf_text_config.num_hidden_layers

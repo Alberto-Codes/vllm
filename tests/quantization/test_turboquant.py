@@ -35,37 +35,37 @@ def _is_power_of_2(n: int) -> bool:
 # Expected concrete values for each preset at head_dim=128.
 # fmt: off
 PRESET_EXPECTED = {
-    "tq-k8v4": dict(
+    "turboquant_k8v4": dict(
         key_fp8=True,  key_quant_bits=8,
         key_mse_bits=0, value_quant_bits=4,
         mse_bits=4, n_centroids=16, centroid_bits=4,
         norm_correction=False,
         key_packed_size=128, value_packed_size=68,
-        slot_size=196, padded_slot_size=256,
+        slot_size=196, slot_size_aligned=196,
     ),
-    "tq-t4nc": dict(
+    "turboquant_4bit_nc": dict(
         key_fp8=False, key_quant_bits=4,
         key_mse_bits=4, value_quant_bits=4,
         mse_bits=4, n_centroids=16, centroid_bits=4,
         norm_correction=True,
         key_packed_size=68, value_packed_size=68,
-        slot_size=136, padded_slot_size=256,
+        slot_size=136, slot_size_aligned=136,
     ),
-    "tq-k3v4nc": dict(
+    "turboquant_k3v4_nc": dict(
         key_fp8=False, key_quant_bits=3,
         key_mse_bits=3, value_quant_bits=4,
         mse_bits=3, n_centroids=8, centroid_bits=3,
         norm_correction=True,
         key_packed_size=52, value_packed_size=68,
-        slot_size=120, padded_slot_size=128,
+        slot_size=120, slot_size_aligned=120,
     ),
-    "tq-t3nc": dict(
+    "turboquant_3bit_nc": dict(
         key_fp8=False, key_quant_bits=3,
         key_mse_bits=3, value_quant_bits=3,
         mse_bits=3, n_centroids=8, centroid_bits=3,
         norm_correction=True,
         key_packed_size=52, value_packed_size=52,
-        slot_size=104, padded_slot_size=128,
+        slot_size=104, slot_size_aligned=104,
     ),
 }
 # fmt: on
@@ -85,7 +85,7 @@ class TestTurboQuantConfig:
 
     def test_invalid_preset_raises(self):
         with pytest.raises(ValueError, match="Unknown TurboQuant"):
-            TurboQuantConfig.from_cache_dtype("tq-invalid", head_dim=128)
+            TurboQuantConfig.from_cache_dtype("turboquant_invalid", head_dim=128)
 
     # ---- Per-preset concrete value checks (table-driven) ----
 
@@ -123,7 +123,7 @@ class TestTurboQuantConfig:
         assert cfg.key_packed_size == exp["key_packed_size"]
         assert cfg.value_packed_size == exp["value_packed_size"]
         assert cfg.slot_size == exp["slot_size"]
-        assert cfg.padded_slot_size == exp["padded_slot_size"]
+        assert cfg.slot_size_aligned == exp["slot_size_aligned"]
 
     # ---- Cross-preset structural invariants ----
 
@@ -133,11 +133,11 @@ class TestTurboQuantConfig:
         assert cfg.slot_size == cfg.key_packed_size + cfg.value_packed_size
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
-    def test_padded_slot_is_power_of_2(self, preset):
+    def test_padded_slot_is_even(self, preset):
         cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
-        assert cfg.padded_slot_size >= cfg.slot_size
-        assert _is_power_of_2(cfg.padded_slot_size), (
-            f"padded_slot_size={cfg.padded_slot_size} is not power of 2")
+        assert cfg.slot_size_aligned >= cfg.slot_size
+        assert cfg.slot_size_aligned % 2 == 0, (
+            f"slot_size_aligned={cfg.slot_size_aligned} is not even")
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
     def test_key_value_packed_sizes_positive(self, preset):
@@ -172,8 +172,8 @@ class TestTurboQuantConfig:
         cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=head_dim)
         assert cfg.head_dim == head_dim
         assert cfg.slot_size == cfg.key_packed_size + cfg.value_packed_size
-        assert cfg.padded_slot_size >= cfg.slot_size
-        assert _is_power_of_2(cfg.padded_slot_size)
+        assert cfg.slot_size_aligned >= cfg.slot_size
+        assert cfg.slot_size_aligned % 2 == 0
 
     # ---- Boundary skip layers ----
 
