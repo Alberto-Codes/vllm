@@ -14,9 +14,15 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
     SlidingWindowManager,
+    get_manager_for_kv_cache_spec,
 )
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    SlidingWindowSpec,
+    TQFullAttentionSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -429,3 +435,65 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
         )
         == 15
     )
+
+
+def test_tq_full_attention_spec_uses_tq_slot_size_for_page_bytes():
+    spec = TQFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=128,
+        dtype=torch.float16,
+        tq_slot_size=256,
+    )
+
+    assert spec.real_page_size_bytes == 16 * 2 * 256
+    assert spec.page_size_bytes == 16 * 2 * 256
+
+
+def test_tq_full_attention_spec_merge_preserves_slot_size():
+    spec_a = TQFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=128,
+        dtype=torch.float16,
+        tq_slot_size=256,
+    )
+    spec_b = TQFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=128,
+        dtype=torch.float16,
+        tq_slot_size=256,
+    )
+
+    merged = TQFullAttentionSpec.merge([spec_a, spec_b])
+
+    assert isinstance(merged, TQFullAttentionSpec)
+    assert merged.tq_slot_size == 256
+    assert merged.real_page_size_bytes == spec_a.real_page_size_bytes
+    assert merged.page_size_bytes == spec_a.page_size_bytes
+
+
+def test_tq_full_attention_spec_uses_full_attention_manager():
+    spec = TQFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=128,
+        dtype=torch.float16,
+        tq_slot_size=256,
+    )
+    block_pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=16)
+
+    manager = get_manager_for_kv_cache_spec(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+    )
+
+    assert isinstance(manager, FullAttentionManager)
+    assert manager.kv_cache_spec is spec
